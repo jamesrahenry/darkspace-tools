@@ -61,7 +61,7 @@ SSH to your router server and clone the repo:
 ```bash
 ssh root@<your-router-ip>
 
-git clone https://github.com/YOUR_ORG/darkspace-tools.git
+git clone https://github.com/jamesrahenry/darkspace-tools.git
 cd darkspace-tools
 
 # Install all prerequisites

@@ -11,6 +11,11 @@
 
 set -euo pipefail
 
+if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root" >&2
+    exit 1
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -42,8 +47,11 @@ cd "$PROJECT_DIR"
 
 # Load configuration
 if [[ -f "ansible/current-config.env" ]]; then
-    log "Loading configuration..."
+    log "Loading configuration from ansible/current-config.env..."
     source ansible/current-config.env
+elif [[ -f ".env" ]]; then
+    log "Loading configuration from .env..."
+    source .env
 fi
 
 PROFILE="${DARKSPACE_PROFILE:-netflow}"
@@ -190,11 +198,14 @@ NEW_DROPLET_ID=$(doctl compute droplet list --format ID,Name --no-header | grep 
 
 # Wait for active
 log "Waiting for droplet..."
-while true; do
+WAIT_ACTIVE=0
+while [[ $WAIT_ACTIVE -lt 30 ]]; do
     STATUS=$(doctl compute droplet get "$NEW_DROPLET_ID" --format Status --no-header)
     [[ "$STATUS" == "active" ]] && break
+    WAIT_ACTIVE=$((WAIT_ACTIVE + 1))
     sleep 10
 done
+[[ "$STATUS" != "active" ]] && error "Droplet did not become active after 5 minutes"
 
 # Wait for private IP
 WAIT_ATTEMPTS=0

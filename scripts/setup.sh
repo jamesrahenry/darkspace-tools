@@ -6,6 +6,11 @@
 
 set -euo pipefail
 
+if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root" >&2
+    exit 1
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -91,12 +96,13 @@ if [[ "$PROFILE" == "honeypot-lite" ]]; then
     prompt "Enter service letters (e.g., 'cds' for Cowrie+Dionaea+Suricata):"
     read -r SERVICE_SELECTION
 
-    SERVICES=""
-    [[ "$SERVICE_SELECTION" == *c* ]] && SERVICES="${SERVICES}cowrie,"
-    [[ "$SERVICE_SELECTION" == *d* ]] && SERVICES="${SERVICES}dionaea,"
-    [[ "$SERVICE_SELECTION" == *h* ]] && SERVICES="${SERVICES}honeytrap,"
-    [[ "$SERVICE_SELECTION" == *m* ]] && SERVICES="${SERVICES}mailoney,"
-    SERVICES="${SERVICES}suricata"  # Always include Suricata
+    SELECTED=()
+    [[ "$SERVICE_SELECTION" == *c* ]] && SELECTED+=("cowrie")
+    [[ "$SERVICE_SELECTION" == *d* ]] && SELECTED+=("dionaea")
+    [[ "$SERVICE_SELECTION" == *h* ]] && SELECTED+=("honeytrap")
+    [[ "$SERVICE_SELECTION" == *m* ]] && SELECTED+=("mailoney")
+    SELECTED+=("suricata")  # Always include Suricata
+    SERVICES=$(IFS=,; echo "${SELECTED[*]}")
     success "Services: $SERVICES"
 fi
 

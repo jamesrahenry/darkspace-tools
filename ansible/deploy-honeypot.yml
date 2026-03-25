@@ -21,9 +21,9 @@
     tpot_user: "honeypot"
     tpot_dir: "/opt/tpot"
     tpot_data_dir: "/data/tpot"
-    elastic_password: "{{ vault_elastic_password | default(lookup('password', '/dev/null length=32 chars=ascii_letters,digits')) }}"
-    tpot_hive_password: "{{ vault_tpot_hive_password | default(lookup('password', '/dev/null length=32 chars=ascii_letters,digits')) }}"
-    tpot_web_password: "{{ vault_tpot_web_password | default(lookup('password', '/dev/null length=32 chars=ascii_letters,digits')) }}"
+    elastic_password: "{{ vault_elastic_password | default(lookup('password', '/root/.darkspace-elastic-pw length=32 chars=ascii_letters,digits')) }}"
+    tpot_hive_password: "{{ vault_tpot_hive_password | default(lookup('password', '/root/.darkspace-hive-pw length=32 chars=ascii_letters,digits')) }}"
+    tpot_web_password: "{{ vault_tpot_web_password | default(lookup('password', '/root/.darkspace-web-pw length=32 chars=ascii_letters,digits')) }}"
     # Services to enable (for honeypot-lite, override with -e "services=['cowrie','suricata']")
     services: "{{ lookup('env', 'DARKSPACE_SERVICES') | default('all', true) }}"
 
@@ -148,13 +148,20 @@
 
     - name: Save credentials (encrypted)
       shell: |
-        echo "T-Pot Web UI: https://{{ ansible_default_ipv4.address }}:64297" > /tmp/creds.txt
-        echo "Username: admin" >> /tmp/creds.txt
-        echo "Password: {{ tpot_web_password }}" >> /tmp/creds.txt
-        echo "Elasticsearch: https://{{ ansible_default_ipv4.address }}:9200" >> /tmp/creds.txt
-        echo "ES Password: {{ elastic_password }}" >> /tmp/creds.txt
+        echo "Elastic password: {{ elastic_password }}" > /tmp/creds.txt
+        echo "T-Pot Hive password: {{ tpot_hive_password }}" >> /tmp/creds.txt
+        echo "T-Pot Web password: {{ tpot_web_password }}" >> /tmp/creds.txt
         openssl enc -aes-256-cbc -pbkdf2 -salt -in /tmp/creds.txt -out /root/.tpot-credentials.enc -pass pass:"$(hostname)-$(date +%Y)"
         rm -f /tmp/creds.txt
+      args:
+        creates: /root/.tpot-credentials.enc
+
+    - name: Secure credentials file
+      file:
+        path: /root/.tpot-credentials.enc
+        mode: '0600'
+        owner: root
+        group: root
       no_log: true
 
     - name: Display honeypot deployment complete

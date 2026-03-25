@@ -42,7 +42,8 @@ status: ## Quick health check
 	@echo "=== Quick Status ==="
 	@echo ""
 	@echo "GRE Tunnel:"
-	@ip link show darkspace-gre 2>/dev/null | head -2 || echo "  Not configured"
+	@GRE_IF=$$(grep -s GRE_INTERFACE ansible/current-config.env .env 2>/dev/null | head -1 | cut -d= -f2); \
+	 ip link show "$${GRE_IF:-darkspace-gre}" 2>/dev/null | head -2 || echo "  Not configured"
 	@echo ""
 	@echo "iptables NAT rules:"
 	@sudo iptables -t nat -L PREROUTING -n 2>/dev/null | grep -c DNAT || echo "  0 DNAT rules"
@@ -91,4 +92,9 @@ check-sanitization: ## Verify no real/private IPs leaked in codebase
 add-service: ## Add a honeypot service (for honeypot-lite profile)
 	@echo "Adding service: $(SERVICE)"
 	@echo "Available: cowrie, dionaea, honeytrap, mailoney, suricata"
-	@echo "TODO: Implement service addition to running deployment"
+	@echo ""
+	@echo "To add a service manually:"
+	@echo "  1. Edit /opt/tpot/docker-compose.yml on the traffic-host"
+	@echo "  2. Add the service definition (see docs/UPGRADING.md)"
+	@echo "  3. Add matching DNAT/FORWARD rules on the router"
+	@echo "  4. Restart: ssh root@<vpc-ip> systemctl restart tpot"

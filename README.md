@@ -135,11 +135,12 @@ See [docs/QUICKSTART.md](docs/QUICKSTART.md) for the full 5-minute guide.
 ```
 make help         Show all targets
 make setup        Interactive setup wizard
-make deploy       Deploy current profile
+make deploy       Deploy with selected profile (PROFILE=netflow|ids|honeypot-lite|honeypot-full)
 make teardown     Destroy infrastructure
 make diagnose     Run all diagnostics
 make status       Quick health check
 make lint         Shellcheck + ansible-lint
+make check-sanitization  Verify no real IPs in codebase
 ```
 
 ## Prerequisites

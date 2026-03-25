@@ -29,7 +29,7 @@ On your router server:
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_ORG/darkspace-tools.git
+git clone https://github.com/jamesrahenry/darkspace-tools.git
 cd darkspace-tools
 
 # Bootstrap system (installs Ansible, iptables, etc.)

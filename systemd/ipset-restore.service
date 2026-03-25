@@ -8,7 +8,8 @@ Wants=network-pre.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/ipset restore -exist -file /etc/ipset/ipset.rules
+ExecStart=/bin/sh -c '/usr/sbin/ipset restore -exist -file /etc/ipset/ipset.rules || /sbin/ipset restore -exist -file /etc/ipset/ipset.rules'
+ConditionPathExists=/etc/ipset/ipset.rules
 
 [Install]
 WantedBy=multi-user.target

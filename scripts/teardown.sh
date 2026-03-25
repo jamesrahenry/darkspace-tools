@@ -5,6 +5,11 @@
 
 set -euo pipefail
 
+if [[ $EUID -ne 0 ]]; then
+    echo "This script must be run as root" >&2
+    exit 1
+fi
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -24,6 +29,8 @@ TARGET_IP=""
 GRE_INTERFACE="darkspace-gre"
 if [[ -f "$PROJECT_DIR/ansible/current-config.env" ]]; then
     source "$PROJECT_DIR/ansible/current-config.env"
+elif [[ -f "$PROJECT_DIR/.env" ]]; then
+    source "$PROJECT_DIR/.env"
 fi
 
 echo "========================================="

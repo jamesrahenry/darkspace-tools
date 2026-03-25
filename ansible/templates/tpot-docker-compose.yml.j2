@@ -174,7 +174,7 @@ services:
       - "{{ ansible_default_ipv4.address }}:64297:64297"
     volumes:
       - nginx_conf:/etc/nginx/conf.d
-      - nginx_cert:{{ tpot_data_dir }}/nginx/cert
+      - {{ tpot_data_dir }}/nginx/cert:/etc/nginx/cert
       - nginx_logs:/var/log/nginx
     environment:
       - NGINX_WEB_USER=${NGINX_WEB_USER:-admin}
@@ -237,6 +237,5 @@ volumes:
   logstash_data:
   logstash_conf:
   nginx_conf:
-  nginx_cert:
   nginx_logs:
   ewsposter_data:
