@@ -1,0 +1,144 @@
+---
+# deploy-traffic-host.yml
+# Configure traffic-host with target IP binding and policy routing
+# Used by: ids, honeypot-lite, honeypot-full profiles
+
+- name: Configure Traffic Host
+  hosts: traffic_hosts
+  become: yes
+  gather_facts: yes
+
+  vars:
+    target_ip: "{{ hostvars[inventory_hostname]['target_ip'] }}"
+    router_vpc_ip: "{{ hostvars[inventory_hostname]['router_vpc_ip'] }}"
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - nginx
+          - tcpdump
+          - nmap
+          - htop
+          - vim
+          - bind9-dnsutils
+          - netcat-openbsd
+          - iptables-persistent
+          - netfilter-persistent
+        state: present
+        update_cache: yes
+
+    - name: Load dummy kernel module
+      modprobe:
+        name: dummy
+        state: present
+
+    - name: Make dummy module persistent
+      lineinfile:
+        path: /etc/modules
+        line: dummy
+        create: yes
+
+    - name: Check if dummy0 interface exists
+      command: ip link show dummy0
+      register: dummy_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create dummy0 interface if not exists
+      command: ip link add dummy0 type dummy
+      when: dummy_check.rc != 0
+
+    - name: Bring up dummy0 interface
+      command: ip link set dummy0 up
+
+    - name: Sanitize target IP
+      set_fact:
+        safe_target_ip: "{{ target_ip | regex_replace('[^0-9.]', '') }}"
+
+    - name: Validate target IP format
+      assert:
+        that:
+          - safe_target_ip | regex_search('^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$') is not none
+        fail_msg: "Invalid target IP format: {{ target_ip }}"
+
+    - name: Check if target IP is already bound
+      command: ip addr show dummy0
+      register: dummy_addr_check
+      changed_when: false
+
+    - name: Add target IP to dummy0 interface
+      command: ip addr add {{ safe_target_ip }}/32 dev dummy0
+      when: safe_target_ip not in dummy_addr_check.stdout
+
+    - name: Configure sysctls for policy routing
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.conf.all.rp_filter', value: '0' }
+        - { name: 'net.ipv4.conf.default.rp_filter', value: '0' }
+        - { name: 'net.ipv4.conf.eth1.rp_filter', value: '0' }
+        - { name: 'net.ipv4.conf.dummy0.rp_filter', value: '0' }
+
+    - name: Create routing table for target IP replies
+      lineinfile:
+        path: /etc/iproute2/rt_tables
+        line: "100 target_replies"
+        create: yes
+
+    - name: Sanitize router VPC IP
+      set_fact:
+        safe_router_vpc_ip: "{{ router_vpc_ip | regex_replace('[^0-9.]', '') }}"
+
+    - name: Get VPC interface name
+      shell: |
+        for iface in eth1 ens4 enp0s4; do
+          if ip link show "$iface" >/dev/null 2>&1; then
+            echo "$iface"
+            exit 0
+          fi
+        done
+        echo "eth1"
+      register: vpc_iface_result
+      changed_when: false
+
+    - name: Set VPC interface fact
+      set_fact:
+        vpc_iface: "{{ vpc_iface_result.stdout }}"
+
+    - name: Configure default route to router
+      shell: |
+        ip route del default 2>/dev/null || true
+        ip route add default via {{ safe_router_vpc_ip }} dev {{ vpc_iface }}
+      changed_when: false
+
+    - name: Add policy routing rule for target IP
+      shell: |
+        ip rule del from {{ safe_target_ip }} lookup target_replies 2>/dev/null || true
+        ip rule add from {{ safe_target_ip }} lookup target_replies priority 100
+      changed_when: false
+
+    - name: Add routes to target_replies table
+      shell: |
+        ip route flush table target_replies 2>/dev/null || true
+        ip route add default via {{ safe_router_vpc_ip }} dev {{ vpc_iface }} table target_replies
+        ip route add {{ safe_target_ip }}/32 dev dummy0 table target_replies scope link
+      changed_when: false
+
+    - name: Enable ICMP responses
+      sysctl:
+        name: net.ipv4.icmp_echo_ignore_all
+        value: '0'
+        state: present
+        reload: yes
+
+    - name: Display traffic-host configuration complete
+      debug:
+        msg:
+          - "Traffic-host configuration complete!"
+          - "Target IP: {{ safe_target_ip }} (bound to dummy0)"
+          - "Default Route: via {{ safe_router_vpc_ip }}"
+          - "Policy routing: from {{ safe_target_ip }} → table target_replies"

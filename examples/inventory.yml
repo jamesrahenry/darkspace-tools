@@ -1,0 +1,41 @@
+# Example Ansible Inventory for Darkspace Tools
+#
+# Copy this file to ansible/inventory.yml and customize with your values.
+# Or run `scripts/setup.sh` to generate it interactively.
+#
+# IP addresses below are RFC 5737 examples. Replace with your actual IPs.
+
+all:
+  children:
+    routers:
+      hosts:
+        localhost:
+          ansible_host: localhost
+          ansible_user: root
+          ansible_connection: local
+
+          # Network configuration (CHANGE THESE)
+          gre_remote_ip: 203.0.113.10       # Darkspace/GRE host IP
+          gre_local_ip: 192.168.240.1       # GRE tunnel local IP
+          gre_interface: darkspace-gre       # GRE interface name
+          target_ip: 198.51.100.50           # Target honeypot IP
+
+          # Cloud provider
+          vpc_region: tor1                   # DigitalOcean region
+
+    traffic_hosts:
+      hosts:
+        traffic-host-01:
+          # This IP is populated by deploy.sh after droplet creation
+          ansible_host: 10.100.0.5           # Traffic-host VPC IP
+          ansible_user: root
+          ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+
+          # Network (must match router config)
+          target_ip: 198.51.100.50           # Same target IP as router
+          router_vpc_ip: 10.100.0.2          # Router's VPC IP
+
+  vars:
+    ansible_ssh_common_args: '-o ConnectTimeout=30 -o StrictHostKeyChecking=no'
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_timeout: 60

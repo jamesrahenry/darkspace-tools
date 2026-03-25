@@ -1,0 +1,202 @@
+---
+# deploy-router.yml
+# Standalone playbook to configure the router with GRE tunnel
+# Used by ALL profiles (netflow, ids, honeypot-lite, honeypot-full)
+
+- name: Configure Router with GRE Tunnel
+  hosts: routers
+  become: yes
+  gather_facts: yes
+
+  vars:
+    gre_remote_ip: "{{ hostvars[inventory_hostname]['gre_remote_ip'] }}"
+    gre_local_ip: "{{ hostvars[inventory_hostname]['gre_local_ip'] }}"
+    gre_interface: "{{ hostvars[inventory_hostname]['gre_interface'] }}"
+    target_ip: "{{ hostvars[inventory_hostname]['target_ip'] }}"
+
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - iproute2
+          - iptables-persistent
+          - netfilter-persistent
+          - tcpdump
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Get local public IP
+      shell: ip -4 addr show eth0 | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1
+      register: local_public_ip
+      changed_when: false
+
+    - name: Check if netplan is available
+      stat:
+        path: /etc/netplan
+      register: netplan_dir
+
+    - name: Configure GRE tunnel using netplan (Debian 13+)
+      when: netplan_dir.stat.exists
+      block:
+        - name: Create GRE tunnel netplan configuration
+          copy:
+            dest: /etc/netplan/99-gre-tunnel.yaml
+            content: |
+              network:
+                version: 2
+                tunnels:
+                  {{ gre_interface }}:
+                    mode: gre
+                    local: {{ local_public_ip.stdout }}
+                    remote: {{ gre_remote_ip }}
+                    addresses:
+                      - {{ gre_local_ip }}/29
+            mode: '0644'
+
+        - name: Apply netplan configuration
+          command: netplan apply
+
+        - name: Wait for GRE interface to come up
+          wait_for:
+            timeout: 5
+
+    - name: Configure GRE tunnel using ip commands (fallback)
+      when: not netplan_dir.stat.exists
+      block:
+        - name: Remove existing GRE tunnel if present
+          shell: |
+            ip link set {{ gre_interface }} down 2>/dev/null || true
+            ip tunnel del {{ gre_interface }} 2>/dev/null || true
+          ignore_errors: yes
+
+        - name: Create GRE tunnel
+          shell: |
+            ip tunnel add {{ gre_interface }} mode gre remote {{ gre_remote_ip }} local {{ local_public_ip.stdout }} ttl 255
+            ip link set {{ gre_interface }} up
+            ip addr add {{ gre_local_ip }}/29 dev {{ gre_interface }}
+
+    - name: Verify GRE tunnel creation
+      shell: ip link show {{ gre_interface }}
+      register: gre_status
+      failed_when: gre_status.rc != 0
+
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Configure firewall for GRE protocol
+      iptables:
+        chain: INPUT
+        protocol: gre
+        jump: ACCEPT
+        comment: "Allow GRE protocol"
+
+    - name: Allow traffic from GRE tunnel interface
+      iptables:
+        chain: INPUT
+        in_interface: "{{ gre_interface }}"
+        jump: ACCEPT
+        comment: "Allow all traffic from GRE tunnel"
+
+    - name: Allow ICMP from darkspace host
+      iptables:
+        chain: INPUT
+        protocol: icmp
+        source: "{{ gre_remote_ip }}"
+        jump: ACCEPT
+        comment: "Allow ICMP from darkspace host"
+
+    - name: Configure GRE to VPC forwarding
+      iptables:
+        chain: FORWARD
+        in_interface: "{{ gre_interface }}"
+        out_interface: eth1
+        jump: ACCEPT
+        comment: "Allow GRE to VPC forwarding"
+
+    - name: Configure VPC to GRE forwarding
+      iptables:
+        chain: FORWARD
+        in_interface: eth1
+        out_interface: "{{ gre_interface }}"
+        jump: ACCEPT
+        comment: "Allow VPC to GRE forwarding"
+
+    - name: Discover honeypot VPC IP
+      set_fact:
+        honeypot_vpc_ip: "{{ hostvars[item]['ansible_host'] }}"
+      with_items: "{{ groups['traffic_hosts'] | default([]) }}"
+      when: groups['traffic_hosts'] is defined and groups['traffic_hosts'] | length > 0
+
+    - name: Use manual honeypot VPC IP if not discovered
+      set_fact:
+        honeypot_vpc_ip: "{{ hostvars[inventory_hostname].get('honeypot_vpc_ip', '') }}"
+      when: honeypot_vpc_ip is not defined
+
+    - name: Configure DNAT for target IP to honeypot
+      iptables:
+        table: nat
+        chain: PREROUTING
+        destination: "{{ target_ip }}"
+        jump: DNAT
+        to_destination: "{{ honeypot_vpc_ip }}"
+        comment: "DNAT target IP to honeypot VPC IP"
+      when: honeypot_vpc_ip is defined and honeypot_vpc_ip != ''
+
+    - name: Configure SNAT for replies from target IP
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        source: "{{ target_ip }}"
+        out_interface: "{{ gre_interface }}"
+        jump: SNAT
+        to_source: "{{ target_ip }}"
+        comment: "Ensure replies from target IP maintain source IP"
+      when: honeypot_vpc_ip is defined and honeypot_vpc_ip != ''
+
+    - name: Create routing table for GRE replies
+      lineinfile:
+        path: /etc/iproute2/rt_tables
+        line: "200 gre_replies"
+        create: yes
+
+    - name: Add policy routing rule for replies from target IP
+      shell: |
+        ip rule del from {{ target_ip }} lookup gre_replies 2>/dev/null || true
+        ip rule add from {{ target_ip }} lookup gre_replies priority 100
+      changed_when: false
+
+    - name: Add routes to gre_replies table
+      shell: |
+        ip route add default via {{ gre_local_ip }} dev {{ gre_interface }} table gre_replies 2>/dev/null || true
+        ip route add {{ gre_local_ip }}/29 dev {{ gre_interface }} table gre_replies scope link 2>/dev/null || true
+      changed_when: false
+
+    - name: Save iptables rules
+      shell: iptables-save > /etc/iptables/rules.v4
+
+    - name: Create GRE tunnel status script
+      copy:
+        dest: /usr/local/bin/gre-tunnel-status.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          echo "=== GRE Tunnel Status ==="
+          echo "Interface: {{ gre_interface }}"
+          ip addr show {{ gre_interface }}
+          echo ""
+          echo "Connectivity to {{ gre_remote_ip }}:"
+          ping -c 3 {{ gre_remote_ip }} || echo "Not reachable"
+
+    - name: Display router configuration
+      debug:
+        msg:
+          - "Router configuration complete!"
+          - "GRE Interface: {{ gre_interface }}"
+          - "Remote: {{ gre_remote_ip }}"
+          - "GRE Local IP: {{ gre_local_ip }}/29"
+          - "Target IP: {{ target_ip }}"

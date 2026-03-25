@@ -1,0 +1,76 @@
+# GRE Tunnel Configuration for Darkspace Tools
+# This file documents the GRE tunnel parameters
+# All IPs below are RFC 5737 examples - replace with your actual values
+
+gre_tunnel:
+  # Remote GRE host (source of tunneled traffic)
+  # Replace with your darkspace host IP
+  remote_host: "203.0.113.10"
+
+  # Local host (router public IP)
+  # Replace with your router's public IP
+  local_host: "YOUR_ROUTER_PUBLIC_IP"
+
+  # GRE tunnel network (inside the tunnel)
+  tunnel_network: "192.168.240.0/29"
+
+  # IP addresses inside the GRE tunnel
+  tunnel_ips:
+    gre_host: "192.168.240.2"      # Remote end (darkspace host)
+    router_host: "192.168.240.1"   # Local end (this router)
+
+  # Target IP (the IP honeypot traffic is addressed to)
+  # Replace with your actual target IP
+  target_ip: "198.51.100.50"
+
+  # Tunnel parameters
+  parameters:
+    mode: "gre"
+    ttl: 64
+    interface_name: "darkspace-gre"
+
+# Network configuration
+network:
+  primary_interface: "eth0"  # Auto-detected during deployment
+
+# Routing
+routing:
+  # Route target IP through GRE tunnel (on router)
+  target_route:
+    destination: "198.51.100.50/32"
+    via: "TRAFFIC_HOST_VPC_IP"  # Set during deployment
+    interface: "eth1"
+
+  # Policy routing tables
+  tables:
+    gre_replies: 200    # On router: routes replies back through GRE
+    target_replies: 100  # On traffic-host: routes target IP replies to router
+
+# Firewall rules
+firewall:
+  allow_gre: true
+  allow_gre_interface: true
+  ip_forwarding: true
+  masquerade_vpc: true
+
+# Testing
+testing:
+  ping_targets:
+    - "192.168.240.2"    # GRE host tunnel IP
+    - "198.51.100.50"    # Target IP
+  http_test_url: "http://198.51.100.50"
+
+# Deployment profiles
+profiles:
+  netflow:
+    description: "GRE tunnel + kernel-level traffic monitoring"
+    components: ["GRE tunnel", "iptables NETFLOW rules", "ipset management"]
+  ids:
+    description: "GRE tunnel + traffic-host + Suricata IDS"
+    components: ["GRE tunnel", "VPC routing", "Traffic-host", "Suricata"]
+  honeypot-lite:
+    description: "GRE tunnel + traffic-host + selected honeypot services"
+    components: ["GRE tunnel", "VPC routing", "Traffic-host", "Selected containers"]
+  honeypot-full:
+    description: "GRE tunnel + traffic-host + full T-Pot ecosystem"
+    components: ["GRE tunnel", "VPC routing", "Traffic-host", "T-Pot", "ELK stack"]

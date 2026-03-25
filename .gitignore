@@ -1,0 +1,97 @@
+# Environment files (contains sensitive configuration)
+.env
+*.env
+!examples/*.env
+
+# Logs and runtime data
+logs/
+*.log
+*.log.*
+
+# Docker volumes and persistent data
+data/
+volumes/
+elasticsearch_data/
+
+# Backup files
+backups/
+*.backup
+*.bak
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+
+# SSL certificates and keys
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# SSH keys
+id_rsa*
+id_ed25519*
+id_ecdsa*
+
+# Ansible environment-specific files (contain actual IPs and SSH keys)
+ansible/inventory.yml
+ansible/current-config.env
+ansible/traffic-host-inventory.yml
+ansible/config.yml
+
+# Ansible Vault password files
+.vault_pass
+.vault_password
+*.vault_pass
+
+# Deployment artifacts
+/etc/digitalocean-vpc-config.env
+deployment-config.txt
+
+# Monitoring and log files
+/var/log/honeypot/
+monitoring/*.log
+
+# Backup files
+*-backup-*.txt
+routes-backup-*.txt
+
+# Ansible retry files
+*.retry
+.ansible/
+
+# Docker override files
+docker-compose.override.yml
+docker-compose.override.yaml
+
+# Terraform state (if used)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db

@@ -1,0 +1,27 @@
+[Unit]
+Description=Darkspace Tools - Honeypot Sensor
+Documentation=https://github.com/YOUR_ORG/darkspace-tools
+Requires=docker.service
+After=docker.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User={{ tpot_user }}
+Group={{ tpot_user }}
+WorkingDirectory={{ tpot_dir }}
+Environment=COMPOSE_HTTP_TIMEOUT=300
+Environment=DOCKER_CLIENT_TIMEOUT=300
+ExecStartPre=/bin/bash -c 'mkdir -p {{ tpot_data_dir }}/{elk/data,elk/logs,nginx/cert,nginx/conf,suricata/log}'
+ExecStartPre=/bin/bash -c 'chown -R {{ tpot_user }}:{{ tpot_user }} {{ tpot_data_dir }}'
+ExecStart=/usr/bin/docker compose -f {{ tpot_dir }}/docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose -f {{ tpot_dir }}/docker-compose.yml down
+ExecReload=/usr/bin/docker compose -f {{ tpot_dir }}/docker-compose.yml restart
+TimeoutStartSec=0
+TimeoutStopSec=300
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

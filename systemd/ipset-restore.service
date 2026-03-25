@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore ipset rules before iptables
+Before=netfilter-persistent.service
+Before=iptables.service
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ipset restore -exist -file /etc/ipset/ipset.rules
+
+[Install]
+WantedBy=multi-user.target

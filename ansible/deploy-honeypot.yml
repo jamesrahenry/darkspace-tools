@@ -1,0 +1,168 @@
+---
+# deploy-honeypot.yml
+# Deploy T-Pot honeypot sensor on traffic-host
+# Used by: honeypot-full profile
+# Can also deploy individual services for honeypot-lite profile
+#
+# Variables:
+#   profile: honeypot-lite or honeypot-full
+#   target_ip: IP address for honeypot services to bind to
+#   services: list of services to enable (honeypot-lite only)
+
+- name: Deploy Honeypot Sensor
+  hosts: traffic_hosts
+  become: yes
+  gather_facts: yes
+
+  vars:
+    profile: "{{ lookup('env', 'DARKSPACE_PROFILE') | default('honeypot-full', true) }}"
+    target_ip: "{{ hostvars[inventory_hostname]['target_ip'] | default('198.51.100.50') }}"
+    tpot_version: "24.04.1"
+    tpot_user: "honeypot"
+    tpot_dir: "/opt/tpot"
+    tpot_data_dir: "/data/tpot"
+    elastic_password: "{{ vault_elastic_password | default(lookup('password', '/dev/null length=32 chars=ascii_letters,digits')) }}"
+    tpot_hive_password: "{{ vault_tpot_hive_password | default(lookup('password', '/dev/null length=32 chars=ascii_letters,digits')) }}"
+    tpot_web_password: "{{ vault_tpot_web_password | default(lookup('password', '/dev/null length=32 chars=ascii_letters,digits')) }}"
+    # Services to enable (for honeypot-lite, override with -e "services=['cowrie','suricata']")
+    services: "{{ lookup('env', 'DARKSPACE_SERVICES') | default('all', true) }}"
+
+  tasks:
+    - name: Check profile
+      debug:
+        msg: "Deploying honeypot with profile: {{ profile }}, services: {{ services }}"
+
+    - name: Install Docker dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - python3-docker
+        state: present
+        update_cache: yes
+
+    - name: Add Docker GPG key
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+      args:
+        creates: /etc/apt/keyrings/docker.asc
+
+    - name: Add Docker repository
+      shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+      args:
+        creates: /etc/apt/sources.list.d/docker.list
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create honeypot user
+      user:
+        name: "{{ tpot_user }}"
+        groups: docker
+        append: yes
+        shell: /bin/bash
+
+    - name: Create T-Pot directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ tpot_user }}"
+        group: "{{ tpot_user }}"
+        mode: '0755'
+      loop:
+        - "{{ tpot_dir }}"
+        - "{{ tpot_data_dir }}"
+        - "{{ tpot_data_dir }}/elk/data"
+        - "{{ tpot_data_dir }}/elk/logs"
+        - "{{ tpot_data_dir }}/nginx/cert"
+        - "{{ tpot_data_dir }}/nginx/conf"
+        - "{{ tpot_data_dir }}/suricata/log"
+
+    - name: Deploy T-Pot environment file
+      template:
+        src: tpot.env.j2
+        dest: "{{ tpot_dir }}/.env"
+        owner: "{{ tpot_user }}"
+        group: "{{ tpot_user }}"
+        mode: '0600'
+
+    - name: Deploy full T-Pot Docker Compose (honeypot-full)
+      template:
+        src: tpot-docker-compose.yml.j2
+        dest: "{{ tpot_dir }}/docker-compose.yml"
+        owner: "{{ tpot_user }}"
+        group: "{{ tpot_user }}"
+        mode: '0644'
+      when: profile == 'honeypot-full' or services == 'all'
+
+    - name: Deploy lightweight Docker Compose (honeypot-lite / ids)
+      template:
+        src: docker-compose.services.yml.j2
+        dest: "{{ tpot_dir }}/docker-compose.yml"
+        owner: "{{ tpot_user }}"
+        group: "{{ tpot_user }}"
+        mode: '0644'
+      when: profile in ['honeypot-lite', 'ids'] and services != 'all'
+
+    - name: Deploy T-Pot systemd service
+      template:
+        src: tpot.service.j2
+        dest: /etc/systemd/system/tpot.service
+        mode: '0644'
+
+    - name: Deploy monitoring script
+      template:
+        src: monitor-tpot.sh.j2
+        dest: /usr/local/bin/monitor-tpot.sh
+        mode: '0755'
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Start T-Pot service
+      systemd:
+        name: tpot
+        state: started
+        enabled: yes
+
+    - name: Save credentials (encrypted)
+      shell: |
+        echo "T-Pot Web UI: https://{{ ansible_default_ipv4.address }}:64297" > /tmp/creds.txt
+        echo "Username: admin" >> /tmp/creds.txt
+        echo "Password: {{ tpot_web_password }}" >> /tmp/creds.txt
+        echo "Elasticsearch: https://{{ ansible_default_ipv4.address }}:9200" >> /tmp/creds.txt
+        echo "ES Password: {{ elastic_password }}" >> /tmp/creds.txt
+        openssl enc -aes-256-cbc -pbkdf2 -salt -in /tmp/creds.txt -out /root/.tpot-credentials.enc -pass pass:"$(hostname)-$(date +%Y)"
+        rm -f /tmp/creds.txt
+      no_log: true
+
+    - name: Display honeypot deployment complete
+      debug:
+        msg:
+          - "Honeypot deployment complete!"
+          - "Profile: {{ profile }}"
+          - "Target IP: {{ target_ip }}"
+          - "Management IP: {{ ansible_default_ipv4.address }}"
+          - "Web UI: https://{{ ansible_default_ipv4.address }}:64297"
+          - "Credentials saved to: /root/.tpot-credentials.enc"

@@ -1,0 +1,536 @@
+---
+# deploy-all.yml
+# MAIN ANSIBLE PLAYBOOK - Darkspace tools infrastructure deployment
+#
+# Deploys infrastructure based on the selected profile:
+#   netflow       - Router with GRE tunnel + iptables netflow monitoring
+#   ids           - Above + traffic-host with Suricata IDS
+#   honeypot-lite - Above + selected honeypot containers
+#   honeypot-full - Above + full T-Pot (all honeypots + ELK stack)
+#
+# Usage:
+#   ansible-playbook deploy-all.yml --limit localhost -e "profile=netflow"
+#   ansible-playbook -i traffic-host-inventory.yml deploy-all.yml --limit traffic_hosts -e "profile=honeypot-full"
+
+- name: Configure Router (GRE Tunnel + Forwarding)
+  hosts: localhost
+  become: yes
+  gather_facts: yes
+  connection: local
+
+  vars:
+    profile: "{{ lookup('env', 'DARKSPACE_PROFILE') | default('netflow', true) }}"
+    gre_remote_ip: "{{ ansible_env.DARKSPACE_IP | default('203.0.113.10') }}"
+    gre_local_ip: "192.168.240.1"
+    gre_interface: "{{ ansible_env.GRE_INTERFACE | default('darkspace-gre') }}"
+    target_ip: "{{ ansible_env.TARGET_IP | default('198.51.100.50') }}"
+    router_ip: "{{ ansible_default_ipv4.address }}"
+
+  tasks:
+    - name: Display deployment configuration
+      debug:
+        msg:
+          - "Deploying with profile: {{ profile }}"
+          - "Router IP: {{ router_ip }}"
+          - "Darkspace IP: {{ gre_remote_ip }}"
+          - "Target IP: {{ target_ip }}"
+          - "GRE Interface: {{ gre_interface }}"
+
+    - name: Install required packages
+      apt:
+        name:
+          - iproute2
+          - iptables-persistent
+          - netfilter-persistent
+          - tcpdump
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Validate IP addresses
+      assert:
+        that:
+          - item.value | regex_search('^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$') is not none
+          - item.value is not match('^0\..*')
+          - item.value is not match('^127\..*')
+          - item.value is not match('^169\.254\..*')
+          - item.value is not match('^224\..*')
+          - item.value is not match('^240\..*')
+        fail_msg: "Invalid or reserved IP address: {{ item.name }} = {{ item.value }}"
+        success_msg: "Valid IP address: {{ item.name }} = {{ item.value }}"
+      loop:
+        - { name: "gre_remote_ip", value: "{{ gre_remote_ip }}" }
+        - { name: "target_ip", value: "{{ target_ip }}" }
+        - { name: "gre_local_ip", value: "{{ gre_local_ip }}" }
+        - { name: "router_ip", value: "{{ router_ip }}" }
+
+    - name: Validate interface name
+      assert:
+        that:
+          - gre_interface | regex_search('^[a-z][a-z0-9-]{0,14}$') is not none
+          - gre_interface | length <= 15
+          - gre_interface is not match('.*--.*')
+        fail_msg: "Invalid interface name: {{ gre_interface }}"
+        success_msg: "Valid interface name: {{ gre_interface }}"
+
+    - name: Sanitize all variables for shell safety
+      set_fact:
+        safe_gre_interface: "{{ gre_interface | regex_replace('[^a-z0-9-]', '') }}"
+        safe_gre_remote_ip: "{{ gre_remote_ip | regex_replace('[^0-9.]', '') }}"
+        safe_target_ip: "{{ target_ip | regex_replace('[^0-9.]', '') }}"
+        safe_gre_local_ip: "{{ gre_local_ip | regex_replace('[^0-9.]', '') }}"
+        safe_router_ip: "{{ router_ip | regex_replace('[^0-9.]', '') }}"
+
+    - name: Check if GRE tunnel exists
+      command: ip link show {{ safe_gre_interface }}
+      register: gre_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create GRE tunnel if not exists
+      block:
+        - name: Add GRE tunnel
+          command: >
+            ip tunnel add {{ safe_gre_interface }}
+            mode gre
+            remote {{ safe_gre_remote_ip }}
+            local {{ safe_router_ip }}
+            ttl 255
+          args:
+            creates: /sys/class/net/{{ safe_gre_interface }}
+
+        - name: Bring up GRE interface
+          command: ip link set {{ safe_gre_interface }} up
+
+        - name: Check if IP is already assigned to GRE interface
+          command: ip addr show {{ safe_gre_interface }}
+          register: gre_ip_check
+          changed_when: false
+
+        - name: Add IP address to GRE interface if not present
+          command: ip addr add {{ safe_gre_local_ip }}/29 dev {{ safe_gre_interface }}
+          when: safe_gre_local_ip not in gre_ip_check.stdout
+      when: gre_check.rc != 0
+
+    - name: Ensure GRE tunnel is always up
+      command: ip link set {{ safe_gre_interface }} up
+      changed_when: false
+
+    - name: Remove target IP from router if present
+      command: ip addr del {{ safe_target_ip }}/32 dev {{ safe_gre_interface }}
+      failed_when: false
+      changed_when: false
+
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: Detect VPC interface
+      shell: |
+        for iface in eth1 ens4 enp0s4; do
+          if ip link show "$iface" >/dev/null 2>&1; then
+            echo "$iface"
+            exit 0
+          fi
+        done
+        echo "eth1"
+      register: vpc_interface_result
+      changed_when: false
+
+    - name: Set VPC interface variable
+      set_fact:
+        vpc_interface: "{{ vpc_interface_result.stdout }}"
+
+    - name: Discover honeypot VPC IP from traffic-host
+      set_fact:
+        honeypot_vpc_ip: "{{ hostvars[groups['traffic_hosts'][0]].get('ansible_host', '') }}"
+      when:
+        - groups['traffic_hosts'] is defined
+        - groups['traffic_hosts'] | length > 0
+        - hostvars[groups['traffic_hosts'][0]].get('ansible_host', '') != ''
+      failed_when: false
+
+    - name: Use manual honeypot VPC IP if not discovered
+      set_fact:
+        honeypot_vpc_ip: "{{ ansible_env.HONEYPOT_VPC_IP | default('') }}"
+      when: honeypot_vpc_ip is not defined or honeypot_vpc_ip == ''
+
+    - name: Display discovered honeypot VPC IP
+      debug:
+        msg: "Honeypot VPC IP: {{ honeypot_vpc_ip | default('Not yet discovered - will be configured after traffic-host creation') }}"
+
+    # NAT and forwarding rules (for profiles that use a traffic-host)
+    - name: Configure DNAT for target IP to honeypot
+      iptables:
+        table: nat
+        chain: PREROUTING
+        destination: "{{ safe_target_ip }}"
+        jump: DNAT
+        to_destination: "{{ honeypot_vpc_ip }}"
+        comment: "DNAT target IP to honeypot VPC IP"
+      when:
+        - honeypot_vpc_ip is defined
+        - honeypot_vpc_ip != ''
+        - profile != 'netflow'
+
+    - name: Configure firewall for GRE to honeypot forwarding
+      iptables:
+        chain: FORWARD
+        in_interface: "{{ safe_gre_interface }}"
+        out_interface: "{{ vpc_interface }}"
+        destination: "{{ honeypot_vpc_ip }}"
+        jump: ACCEPT
+        comment: "Forward GRE traffic to honeypot"
+      when:
+        - honeypot_vpc_ip is defined
+        - honeypot_vpc_ip != ''
+        - profile != 'netflow'
+
+    - name: Configure firewall for honeypot to GRE forwarding
+      iptables:
+        chain: FORWARD
+        in_interface: "{{ vpc_interface }}"
+        out_interface: "{{ safe_gre_interface }}"
+        source: "{{ honeypot_vpc_ip }}"
+        jump: ACCEPT
+        comment: "Forward honeypot replies to GRE"
+      when:
+        - honeypot_vpc_ip is defined
+        - honeypot_vpc_ip != ''
+        - profile != 'netflow'
+
+    # Fallback forwarding rules (if no specific honeypot VPC IP)
+    - name: Configure generic GRE forwarding (fallback)
+      iptables:
+        chain: FORWARD
+        in_interface: "{{ safe_gre_interface }}"
+        out_interface: "{{ vpc_interface }}"
+        jump: ACCEPT
+        comment: "GRE to VPC forwarding"
+      when: >
+        (honeypot_vpc_ip is not defined or honeypot_vpc_ip == '')
+        and profile != 'netflow'
+
+    - name: Configure generic return forwarding (fallback)
+      iptables:
+        chain: FORWARD
+        in_interface: "{{ vpc_interface }}"
+        out_interface: "{{ safe_gre_interface }}"
+        jump: ACCEPT
+        comment: "VPC to GRE forwarding"
+      when: >
+        (honeypot_vpc_ip is not defined or honeypot_vpc_ip == '')
+        and profile != 'netflow'
+
+    - name: Get VPC network from interface
+      shell: ip addr show {{ vpc_interface }} | grep "inet " | awk '{print $2}'
+      register: vpc_network_result
+      changed_when: false
+      when: profile != 'netflow'
+
+    - name: Configure MASQUERADE for VPC internet access
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        source: "{{ vpc_network_result.stdout }}"
+        out_interface: eth0
+        jump: MASQUERADE
+        comment: "Allow VPC hosts to access internet"
+      when: profile != 'netflow'
+
+    - name: Allow traffic from VPC network
+      iptables:
+        chain: INPUT
+        in_interface: "{{ vpc_interface }}"
+        source: "{{ vpc_network_result.stdout | regex_replace('/.*', '/20') }}"
+        jump: ACCEPT
+        comment: "Allow all traffic from VPC"
+      when: profile != 'netflow'
+
+    - name: Create routing table for GRE replies
+      lineinfile:
+        path: /etc/iproute2/rt_tables
+        line: "200 gre_replies"
+        create: yes
+
+    - name: Add policy routing rule for replies from target IP
+      shell: |
+        ip rule del from {{ safe_target_ip }} lookup gre_replies 2>/dev/null || true
+        ip rule add from {{ safe_target_ip }} lookup gre_replies priority 100
+      changed_when: false
+
+    - name: Add routes to gre_replies table
+      shell: |
+        ip route add default via {{ safe_gre_local_ip }} dev {{ safe_gre_interface }} table gre_replies 2>/dev/null || true
+        ip route add {{ safe_gre_local_ip }}/29 dev {{ safe_gre_interface }} table gre_replies scope link 2>/dev/null || true
+      changed_when: false
+
+    - name: Save iptables rules
+      shell: |
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4
+
+    - name: Create GRE tunnel status script
+      copy:
+        dest: /usr/local/bin/gre-tunnel-status.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          set -euo pipefail
+          INTERFACE="{{ safe_gre_interface }}"
+          REMOTE_IP="{{ safe_gre_remote_ip }}"
+          echo "=== GRE Tunnel Status ==="
+          echo "Interface: ${INTERFACE}"
+          ip addr show "${INTERFACE}" || echo "Interface not found"
+          echo ""
+          echo "Connectivity to ${REMOTE_IP}:"
+          ping -c 3 -W 2 "${REMOTE_IP}" || echo "Not reachable"
+
+    - name: Display router configuration complete
+      debug:
+        msg:
+          - "Router configuration complete!"
+          - "Profile: {{ profile }}"
+          - "GRE Interface: {{ safe_gre_interface }}"
+          - "GRE Local IP: {{ safe_gre_local_ip }}/29"
+          - "Target IP: {{ safe_target_ip }}"
+          - "IP Forwarding: Enabled"
+
+# Traffic-host play (for ids, honeypot-lite, honeypot-full profiles)
+- name: Configure Traffic Host
+  hosts: traffic_hosts
+  become: yes
+  gather_facts: yes
+
+  vars:
+    profile: "{{ lookup('env', 'DARKSPACE_PROFILE') | default('honeypot-full', true) }}"
+    target_ip: "{{ ansible_env.TARGET_IP | default('198.51.100.50') }}"
+    router_vpc_ip: "{{ hostvars[inventory_hostname].router_vpc_ip | default('10.100.0.2') }}"
+
+  tasks:
+    - name: Get primary IP address
+      set_fact:
+        host_ip: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0]) }}"
+
+    - name: Display traffic-host configuration
+      debug:
+        msg:
+          - "Configuring traffic-host (profile: {{ profile }})"
+          - "Host IP: {{ host_ip }}"
+          - "Target IP: {{ target_ip }}"
+          - "Router VPC IP: {{ router_vpc_ip }}"
+
+    - name: Install required packages
+      apt:
+        name:
+          - nginx
+          - tcpdump
+          - nmap
+          - htop
+          - vim
+          - bind9-dnsutils
+          - netcat-openbsd
+          - iptables-persistent
+          - netfilter-persistent
+        state: present
+        update_cache: yes
+      retries: 3
+      delay: 10
+      register: apt_result
+      until: apt_result is succeeded
+
+    - name: Load dummy kernel module
+      modprobe:
+        name: dummy
+        state: present
+
+    - name: Make dummy module persistent
+      lineinfile:
+        path: /etc/modules
+        line: dummy
+        create: yes
+
+    - name: Check if dummy0 interface exists
+      command: ip link show dummy0
+      register: dummy_check
+      failed_when: false
+      changed_when: false
+
+    - name: Create dummy0 interface if not exists
+      command: ip link add dummy0 type dummy
+      when: dummy_check.rc != 0
+
+    - name: Bring up dummy0 interface
+      command: ip link set dummy0 up
+
+    - name: Sanitize target IP
+      set_fact:
+        safe_target_ip: "{{ target_ip | regex_replace('[^0-9.]', '') }}"
+
+    - name: Validate target IP format
+      assert:
+        that:
+          - safe_target_ip | regex_search('^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$') is not none
+        fail_msg: "Invalid target IP format: {{ target_ip }}"
+
+    - name: Check if target IP is already bound
+      command: ip addr show dummy0
+      register: dummy_addr_check
+      changed_when: false
+
+    - name: Add target IP to dummy0 interface
+      command: ip addr add {{ safe_target_ip }}/32 dev dummy0
+      when: safe_target_ip not in dummy_addr_check.stdout
+
+    - name: Verify target IP is bound
+      command: ip addr show dummy0
+      register: ip_check
+      failed_when: safe_target_ip not in ip_check.stdout
+      changed_when: false
+
+    # Policy routing for target IP source preservation
+    - name: Configure sysctls for policy routing
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.conf.all.rp_filter', value: '0' }
+        - { name: 'net.ipv4.conf.default.rp_filter', value: '0' }
+        - { name: 'net.ipv4.conf.eth1.rp_filter', value: '0' }
+        - { name: 'net.ipv4.conf.dummy0.rp_filter', value: '0' }
+
+    - name: Create routing table for target IP replies
+      lineinfile:
+        path: /etc/iproute2/rt_tables
+        line: "100 target_replies"
+        create: yes
+
+    - name: Sanitize router VPC IP
+      set_fact:
+        safe_router_vpc_ip: "{{ router_vpc_ip | regex_replace('[^0-9.]', '') }}"
+
+    - name: Get VPC interface name
+      shell: |
+        for iface in eth1 ens4 enp0s4; do
+          if ip link show "$iface" >/dev/null 2>&1; then
+            echo "$iface"
+            exit 0
+          fi
+        done
+        echo "eth1"
+      register: vpc_iface_result
+      changed_when: false
+
+    - name: Set VPC interface fact
+      set_fact:
+        vpc_iface: "{{ vpc_iface_result.stdout }}"
+
+    - name: Configure default route to router
+      shell: |
+        ip route del default 2>/dev/null || true
+        ip route add default via {{ safe_router_vpc_ip }} dev {{ vpc_iface }}
+      changed_when: false
+
+    - name: Add policy routing rule for target IP
+      shell: |
+        ip rule del from {{ safe_target_ip }} lookup target_replies 2>/dev/null || true
+        ip rule add from {{ safe_target_ip }} lookup target_replies priority 100
+      changed_when: false
+
+    - name: Add routes to target_replies table
+      shell: |
+        ip route flush table target_replies 2>/dev/null || true
+        ip route add default via {{ safe_router_vpc_ip }} dev {{ vpc_iface }} table target_replies
+        ip route add {{ safe_target_ip }}/32 dev dummy0 table target_replies scope link
+      changed_when: false
+
+    - name: Create web content
+      copy:
+        dest: /var/www/html/index.html
+        content: |
+          <!DOCTYPE html>
+          <html>
+          <head><title>Darkspace Tools Deployment</title></head>
+          <body>
+            <h1>Darkspace Tools - Active</h1>
+            <p>Target IP: {{ target_ip }}</p>
+            <p>Profile: {{ profile }}</p>
+            <p>Deployed with Ansible automation</p>
+          </body>
+          </html>
+
+    - name: Configure nginx for target IP
+      copy:
+        dest: /etc/nginx/sites-available/target-ip
+        content: |
+          server {
+              listen {{ safe_target_ip }}:80;
+              server_name _;
+              root /var/www/html;
+              index index.html;
+              location / {
+                  try_files $uri $uri/ =404;
+              }
+              add_header X-Deployment "darkspace-tools" always;
+          }
+          server {
+              listen 80;
+              server_name _;
+              root /var/www/html;
+              index index.html;
+          }
+
+    - name: Enable nginx site
+      file:
+        src: /etc/nginx/sites-available/target-ip
+        dest: /etc/nginx/sites-enabled/target-ip
+        state: link
+
+    - name: Remove default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Start and enable nginx
+      systemd:
+        name: nginx
+        state: restarted
+        enabled: yes
+
+    - name: Enable ICMP responses
+      sysctl:
+        name: net.ipv4.icmp_echo_ignore_all
+        value: '0'
+        state: present
+        reload: yes
+
+    - name: Test target IP response
+      uri:
+        url: "http://{{ safe_target_ip }}"
+        method: GET
+        timeout: 10
+        validate_certs: no
+      register: http_test
+      retries: 3
+      delay: 5
+      failed_when: false
+
+    - name: Display traffic-host configuration complete
+      debug:
+        msg:
+          - "Traffic-host configuration complete!"
+          - "Profile: {{ profile }}"
+          - "Target IP: {{ safe_target_ip }} (bound to dummy0)"
+          - "VPC IP: {{ host_ip }}"
+          - "Default Route: via {{ safe_router_vpc_ip }} (router)"
+          - "HTTP: {{ 'Working' if http_test.status|default(0) == 200 else 'Check manually' }}"
+
+# Import T-Pot deployment for honeypot-full profile
+- name: Deploy T-Pot Sensor on Traffic Host
+  import_playbook: deploy-honeypot.yml
+  when: ansible_limit is not defined or 'traffic_hosts' in ansible_limit

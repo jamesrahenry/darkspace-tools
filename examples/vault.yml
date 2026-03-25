@@ -1,0 +1,13 @@
+# Example Ansible Vault for Darkspace Tools
+#
+# Copy this file to ansible/vault.yml and encrypt with:
+#   ansible-vault encrypt ansible/vault.yml --vault-password-file ~/.vault_pass
+#
+# Generate passwords with:
+#   openssl rand -base64 32
+
+vault_elastic_password: "CHANGE_ME_elastic_password"
+vault_tpot_hive_password: "CHANGE_ME_hive_password"
+vault_tpot_web_password: "CHANGE_ME_web_password"
+vault_kibana_password: "CHANGE_ME_kibana_password"
+vault_logstash_password: "CHANGE_ME_logstash_password"
